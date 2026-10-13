@@ -1,0 +1,200 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper function to check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Helper function to get user role
+    function getUserRole() {
+      let userDoc = get(/databases/$(database)/documents/users/$(request.auth.uid));
+      return userDoc.data.role != null ? userDoc.data.role : 'user';
+    }
+    
+    // Helper function to check if user has support role or higher
+    function isSupportOrHigher() {
+      let role = getUserRole();
+      return role in ['support', 'admin', 'super_admin'];
+    }
+    
+    // Helper function to check if user is admin or higher
+    function isAdminOrHigher() {
+      let role = getUserRole();
+      return role in ['admin', 'super_admin'];
+    }
+    
+    // Helper function to check if user is super admin
+    function isSuperAdmin() {
+      let role = getUserRole();
+      return role == 'super_admin';
+    }
+    
+    // Users collection
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (request.auth.uid == userId || isSupportOrHigher());
+      allow write: if isAuthenticated() && request.auth.uid == userId;
+
+      // User tickets subcollection
+      match /tickets/{ticketId} {
+        // Read individual ticket - user can read their own, support/admin can read all
+        allow read: if isAuthenticated() && (
+          resource.data.userId == request.auth.uid ||
+          isSupportOrHigher()
+        );
+
+        // List tickets - users can only list their own
+        allow list: if isAuthenticated() && (
+          isSupportOrHigher() ||
+          request.auth.uid == userId
+        );
+
+        // Create ticket - user can create for themselves only
+        allow create: if isAuthenticated() &&
+          request.auth.uid == userId &&
+          request.resource.data.userId == request.auth.uid &&
+          request.resource.data.assignedTo == null &&
+          request.resource.data.status == 'open';
+
+        // Update ticket
+        allow update: if isAuthenticated() && (
+          // User can update their own ticket but cannot change sensitive fields
+          (request.auth.uid == userId &&
+           resource.data.userId == request.auth.uid &&
+           !request.resource.data.diff(resource.data).affectedKeys().hasAny(['assignedTo', 'assignedToName', 'status', 'userId', 'userEmail', 'userName', 'userPhone'])) ||
+          // Support/admin can update tickets with full permissions
+          isSupportOrHigher()
+        );
+
+        // Delete ticket - only super admin
+        allow delete: if isAuthenticated() && isSuperAdmin();
+
+        // Messages as subcollections under user tickets
+        match /messages/{messageId} {
+          // Read individual message - user can read from their tickets, support/admin can read all
+          allow read: if isAuthenticated() && (
+            get(/databases/$(database)/documents/users/$(userId)/tickets/$(ticketId)).data.userId == request.auth.uid ||
+            isSupportOrHigher()
+          );
+
+          // List messages - users can list messages from their tickets, support/admin can list all
+          allow list: if isAuthenticated() && (
+            isSupportOrHigher() ||
+            get(/databases/$(database)/documents/users/$(userId)/tickets/$(ticketId)).data.userId == request.auth.uid
+          );
+
+          // Create message
+          allow create: if isAuthenticated() && (
+            // User can create messages for their own tickets
+            (get(/databases/$(database)/documents/users/$(userId)/tickets/$(ticketId)).data.userId == request.auth.uid &&
+             request.resource.data.senderId == request.auth.uid &&
+             request.resource.data.senderRole == 'user') ||
+            // Support/admin can create admin messages for any ticket
+            (isSupportOrHigher() &&
+             request.resource.data.senderId == request.auth.uid &&
+             request.resource.data.senderRole == 'admin') ||
+            // Support/admin can create system messages for any ticket
+            (isSupportOrHigher() &&
+             request.resource.data.senderRole == 'system')
+          );
+
+          // Messages are immutable
+          allow update: if false;
+          allow delete: if false;
+        }
+      }
+    }
+
+    // Collection group for admin to read all tickets across all users
+    match /users/{userId}/{document=**} {
+      allow read: if isSupportOrHigher();
+    }
+
+    // Legacy top-level tickets collection (for backward compatibility with admin)
+    match /tickets/{ticketId} {
+      // Read individual ticket - support/admin can read all
+      allow read: if isAuthenticated() && isSupportOrHigher();
+
+      // List tickets - support/admin can list all
+      allow list: if isAuthenticated() && isSupportOrHigher();
+
+      // Create, update, delete - not allowed at top level
+      allow create: if false;
+      allow update: if false;
+      allow delete: if false;
+
+      // Messages as subcollections under tickets (read-only for admin)
+      match /messages/{messageId} {
+        allow read: if isAuthenticated() && isSupportOrHigher();
+        allow list: if isAuthenticated() && isSupportOrHigher();
+        allow create: if false;
+        allow update: if false;
+        allow delete: if false;
+      }
+    }
+
+    // Usernames collection
+    match /usernames/{username} {
+      allow read: if true;
+      allow create: if isAuthenticated();
+      allow update: if false;
+      allow delete: if isAuthenticated() && isSuperAdmin();
+    }
+
+    // Products collection
+    match /products/{productId} {
+      allow read: if true;
+      allow write: if isAuthenticated() && isAdminOrHigher();
+    }
+
+    // Orders collection
+    match /orders/{orderId} {
+      allow read: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid ||
+        isSupportOrHigher()
+      );
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && isSupportOrHigher();
+      allow delete: if isAuthenticated() && isSuperAdmin();
+    }
+
+    // Categories collection
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow write: if isAuthenticated() && isAdminOrHigher();
+    }
+
+    // Coupons collection
+    match /coupons/{couponId} {
+      allow read: if true;
+      allow write: if isAuthenticated() && isAdminOrHigher();
+    }
+
+    // Reviews collection
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid ||
+        isAdminOrHigher()
+      );
+      allow delete: if isAuthenticated() && isAdminOrHigher();
+    }
+
+    // Notifications collection
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow write: if isAuthenticated() && (
+        resource.data.userId == request.auth.uid ||
+        isAdminOrHigher()
+      );
+    }
+
+    // Analytics collection
+    match /analytics/{analyticsId} {
+      allow read: if isAuthenticated() && isAdminOrHigher();
+      allow write: if isAuthenticated() && isAdminOrHigher();
+    }
+  }
+}
